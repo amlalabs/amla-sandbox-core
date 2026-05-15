@@ -1,0 +1,73 @@
+[package]
+name = "amla-sandbox"
+description = "AI agent sandbox - integrates VFS, Shell, JS, and Capabilities"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["panic-recovery"]
+
+# Enable panic recovery via catch_unwind.
+# Works out of the box for native builds.
+# For WASM, requires nightly and -Zbuild-std=std,panic_unwind.
+# See .cargo/config.toml for WASM build instructions.
+panic-recovery = []
+
+[dependencies]
+amla-sandbox-vfs.workspace = true
+amla-sandbox-shell.workspace = true
+amla-sandbox-scheduler.workspace = true
+amla-protocol-capabilities.workspace = true
+amla-protocol-constraints.workspace = true
+amla-sandbox-audit.workspace = true
+amla-protocol.workspace = true
+amla-sandbox-tools.workspace = true
+amla-sandbox-js.workspace = true
+ciborium.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+smallvec = { workspace = true, features = ["serde"] }
+chrono = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+# NOTE: Runtime benchmarks are currently disabled due to a cargo bench
+# dependency resolution bug with serde in this workspace. Use the scheduler
+# benchmarks instead: `cargo bench -p amla-sandbox-scheduler`
+
+[dev-dependencies]
+tracking-allocator.workspace = true
+# Enable panic command in shell for testing panic recovery
+amla-sandbox-shell = { workspace = true, features = ["test-panic"] }
+
+# Override workspace lints - WASM exports require unsafe for raw pointers
+[package.metadata.wasm-pack.profile.release]
+# Enable WASM features used by Rust: bulk-memory, nontrapping-float-to-int, sign-ext
+wasm-opt = ["-O3", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-mutable-globals"]
+
+[lints.rust]
+unsafe_code = "warn"
+missing_docs = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+# WASM-specific
+no_mangle_with_rust_abi = "allow"
+not_unsafe_ptr_arg_deref = "allow"
+unreadable_literal = "allow"
+format_push_string = "allow"
+too_many_lines = "allow"
+
+# cargo-machete can't detect deps used only in wasm.rs #[wasm_bindgen] exports
+[package.metadata.cargo-machete]
+ignored = ["ciborium", "getrandom"]

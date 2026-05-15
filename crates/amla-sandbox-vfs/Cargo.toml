@@ -1,0 +1,39 @@
+[package]
+name = "amla-sandbox-vfs"
+description = "In-memory virtual filesystem for AI agent sandboxing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "amla_vfs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+regex.workspace = true
+smallvec = { workspace = true, features = ["const_generics"] }
+amla-sandbox-scheduler.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+# VFS operates in 64-bit WASM contexts where some pedantic casts are safe
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+# VFS-specific: these are safe in 64-bit WASM contexts
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+return_self_not_must_use = "allow"
+needless_continue = "allow"
+manual_let_else = "allow"

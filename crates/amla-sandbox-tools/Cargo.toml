@@ -1,0 +1,39 @@
+[package]
+name = "amla-sandbox-tools"
+description = "Tool catalog with BM25 and semantic search for AI agent capability discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "amla_tools"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["tokenizers"]
+# Enable semantic search via Model2Vec embeddings (~8MB bundled model)
+tokenizers = ["dep:safetensors", "dep:tokenizers"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+# Embeddings (optional - enabled by "tokenizers" feature)
+safetensors = { workspace = true, optional = true }
+tokenizers = { workspace = true, features = ["unstable_wasm"], optional = true, default-features = false }
+
+[dev-dependencies]
+# None needed yet
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -2 }
+style = { level = "deny", priority = -2 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

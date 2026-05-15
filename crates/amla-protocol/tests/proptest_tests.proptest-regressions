@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 47734051915ce90232f45db6c22d139614f577a7da6c3abaec77185f046f8cd7 # shrinks to cap = CapabilityData { key: "cap:aaa", capability_type: "function", data: [161, 100, 100, 97, 116, 97, 246] }
+cc c002f1951fd7b7a797ebdc668f1315de24abc219f065d05fe5684f7739855e2d # shrinks to message = []

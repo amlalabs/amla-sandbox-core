@@ -1,0 +1,213 @@
+# amla-sandbox-core mirror release workflow.
+#
+# Fires on tag pushes matching `v*` to amlalabs/amla-sandbox-core (the mirror
+# repo). The monorepo's release.yml pushes this tag after extracting the
+# subtree.
+#
+# Pipeline:
+#   1. build-wasm: install WASI SDK 24, build `amla-sandbox` as wasm32-wasip1,
+#                   attest provenance, and attach `amla_sandbox.wasm` (+ SHA256) to
+#                   a GitHub Release. The amla-sandbox mirror downloads this
+#                   exact artifact during its own release run.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual re-runs (e.g. after fixing the workflow itself) without forcing
+  # a fresh tag push. Pass `tag` to override `github.ref_name`.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v1.2.3). Required for manual dispatch."
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Validate the dispatched/pushed tag before the build runs. Catches
+  # `workflow_dispatch` mistakes (e.g. typing `main` into the `tag` input)
+  # AND a malicious dispatch on the mirror that would otherwise check out an
+  # arbitrary ref. Defense-in-depth: the monorepo orchestrator already
+  # validates versions on its side, but a manual dispatch on the mirror that
+  # bypasses the orchestrator entirely must still validate here.
+  validate-tag:
+    name: validate tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag name
+        id: tag
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${DISPATCH_TAG:-${GITHUB_REF_NAME}}"
+          if [ -z "$TAG" ]; then
+            echo "No tag resolved (DISPATCH_TAG empty and GITHUB_REF_NAME empty)" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "Tag '$TAG' does not match the expected vX.Y.Z[-prerelease][+build] pattern" >&2
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=${TAG}"
+
+      - uses: actions/checkout@v5
+        with:
+          # Force tag-namespace resolution: `refs/tags/<tag>` rules out a
+          # same-named branch shadowing the tag at checkout time.
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Assert ref is a tag (not a branch)
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git show-ref --verify --quiet "refs/tags/${TAG}"; then
+            echo "Ref '${TAG}' is not an existing tag (it may be a branch, or a missing/typo'd tag)" >&2
+            exit 1
+          fi
+          echo "Ref ${TAG} is a tag."
+
+      - name: Assert github.ref matches the dispatched tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # `actions/attest-build-provenance` signs the workflow's event ref
+          # (GITHUB_REF). For `push: tags: [v*]` that is `refs/tags/vX.Y.Z`.
+          # For `workflow_dispatch` invoked without `--ref refs/tags/vX.Y.Z`,
+          # GITHUB_REF defaults to the branch the workflow file lives on
+          # (typically `refs/heads/main`), even though `inputs.tag` names a
+          # tag. The attestation would then be signed with
+          # `sourceRef=refs/heads/main`, and downstream verification with
+          # `--source-ref refs/tags/vX.Y.Z` would reject it. Fail fast here
+          # rather than producing an unverifiable build.
+          EXPECTED="refs/tags/${DISPATCH_TAG}"
+          ACTUAL="${GITHUB_REF}"
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            cat <<ERR >&2
+          ERROR: workflow_dispatch must run AGAINST the tag, not a branch.
+            Expected GITHUB_REF: $EXPECTED
+            Actual:              $ACTUAL
+
+          Re-dispatch via API with --ref refs/tags/${DISPATCH_TAG}, or via the
+          "Run workflow" UI with the tag selected (NOT the branch). The
+          attestation provenance signs github.ref directly, and downstream
+          verification requires the tag ref to match.
+          ERR
+            exit 1
+          fi
+          echo "GITHUB_REF matches dispatched tag: $ACTUAL"
+
+      - name: Assert Cargo.toml workspace version matches tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          BARE="${TAG#v}"
+          # Python 3.11+ tomllib ships in the stdlib of ubuntu-latest's
+          # default python3. The mirror's `Cargo.toml` is a workspace root
+          # with `[workspace.package].version = "X.Y.Z"`.
+          CARGO=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          if [ "$CARGO" != "$BARE" ]; then
+            echo "Cargo.toml workspace.package.version ($CARGO) != tag ($BARE)" >&2
+            exit 1
+          fi
+          echo "Cargo.toml workspace.package.version matches tag: $BARE"
+
+  build-wasm:
+    name: build wasm and release
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # `refs/tags/<tag>` so checkout resolves to the tag refspec even when
+          # a branch of the same name exists. A bare `${{ inputs.tag }}` would
+          # let git silently prefer a colliding branch over the tag.
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable @ 2026-05-12
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install WASI SDK 24
+        run: |
+          set -euo pipefail
+          cd /tmp
+          curl -fL --retry 3 -o wasi-sdk.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz
+          sudo mkdir -p /opt/wasi-sdk
+          sudo tar -xzf wasi-sdk.tar.gz -C /opt/wasi-sdk --strip-components=1
+          echo "WASI_SDK_PATH=/opt/wasi-sdk" >> "$GITHUB_ENV"
+
+      - name: Build wasm
+        run: cargo build --release --target wasm32-wasip1 -p amla-sandbox
+
+      - name: Stage release artifacts
+        id: stage
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Keep cargo's canonical output name (`amla_sandbox.wasm`) end to
+          # end through the release pipeline. The downstream amla-sandbox
+          # mirror workflow fetches by this exact name. No rename.
+          cp target/wasm32-wasip1/release/amla_sandbox.wasm dist/amla_sandbox.wasm
+          (cd dist && sha256sum amla_sandbox.wasm > amla_sandbox.wasm.sha256)
+          echo "sha256=$(awk '{print $1}' dist/amla_sandbox.wasm.sha256)" >> "$GITHUB_OUTPUT"
+          ls -la dist/
+
+      - name: Attest build provenance for amla_sandbox.wasm
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/amla_sandbox.wasm
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA256: ${{ steps.stage.outputs.sha256 }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # On workflow_dispatch GITHUB_REF_NAME is the workflow branch, not
+          # the tag the operator typed in. Prefer the dispatch input.
+          VERSION="${DISPATCH_TAG:-${GITHUB_REF_NAME}}"
+
+          # Idempotent: an existing release (e.g. from a partial re-run)
+          # gets its assets overwritten; a missing release is created fresh.
+          # `gh release create` is not tolerant of an existing tag.
+          if gh release view "$VERSION" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release $VERSION exists; uploading assets with --clobber"
+            gh release upload "$VERSION" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber \
+              dist/amla_sandbox.wasm \
+              dist/amla_sandbox.wasm.sha256
+          else
+            gh release create "$VERSION" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "$VERSION" \
+              --notes "Automated release for $VERSION. sha256(amla_sandbox.wasm)=${SHA256}" \
+              dist/amla_sandbox.wasm \
+              dist/amla_sandbox.wasm.sha256
+          fi
